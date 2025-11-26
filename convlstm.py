@@ -83,13 +83,14 @@ class ConvLSTM(nn.Module):
 
         # initial hidden states (one for each layer)
         if hidden_state == None:
-            hidden_states = self.init_hidden(batch_size=batch_size, image_size=(height, width))
+            hidden_state = self.init_hidden(batch_size=batch_size, image_size=(height, width))
 
         all_outputs = []        # Stores the outputs of each layer
+        last_hidden_list = []    # Stores the final states of each layer
         current_layer_inputs = input_tensor
 
         for layer in range(self.layer_depth):
-            h, c = hidden_states[layer] # Get the initial hidden states for each layer (which depends on hidden_dim)
+            h, c = hidden_state[layer] # Get the initial hidden states for each layer (which depends on hidden_dim)
             layer_outputs = []          # Stores the hidden state of each point in time
 
             for time in range(time_steps):
@@ -100,8 +101,9 @@ class ConvLSTM(nn.Module):
             current_layer_inputs = layer_output_stack
 
             all_outputs.append(layer_output_stack)
+            last_hidden_list.append(h)
 
-        return all_outputs[-1]
+        return all_outputs[-1], last_hidden_list
 
     def init_hidden(self, batch_size, image_size):
         init_states = []

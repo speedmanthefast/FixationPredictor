@@ -13,8 +13,13 @@ from torchvision import datasets, transforms
 import cv2
 from sklearn.model_selection import train_test_split
 
+'''
+TODO:
+    - Evaluation function
+'''
+
 class FixationPredictor(nn.Module):
-    def __init__(self, data_directory, hidden_dim=32, kernel_size=(3, 3), layer_depth=1, batch_size=32, learning_rate=0.001, weight_decay=0.0001):
+    def __init__(self, data_directory, hidden_dim=32, kernel_size=(3, 3), layer_depth=1, batch_size=32, learning_rate=0.001, weight_decay=0.0001, max_epochs=50, sequence_to_one=True):
         # Init Pytorch module
         super(FixationPredictor, self).__init__()
 
@@ -25,12 +30,15 @@ class FixationPredictor(nn.Module):
         self.layer_depth = layer_depth
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
+        self.max_epochs = max_epochs
+        self.sequence_to_one = sequence_to_one
 
         # Load dataset (also sets some member variables)
         self.loadData(data_directory)
 
         # Instantiate a ConvLSTM layer, responsible for encoding spatial and temporal information
         self.conv_lstm = ConvLSTM(input_dim=self.channel_depth, hidden_dim=self.hidden_dim, kernel_size=self.kernel_size, layer_depth=self.layer_depth)
+        self.last_hidden_list = None
 
         # Instantiate an addition convolutional layer, responsbile for decoding spatial and temporal into probabilities
         self.decoder_conv = nn.Conv2d(in_channels=self.hidden_dim, out_channels=1, kernel_size=1)
@@ -40,72 +48,96 @@ class FixationPredictor(nn.Module):
         print(f"Using {self.device} device")
         self.to(self.device)
 
-    def forward(self, x):
+    def forward(self, x, hidden_state=None):
         # x must be (B, T, C, H, W)
 
         B, T, C, H, W = x.shape
 
-        output = self.conv_lstm(x)
+        output, new_hidden_state = self.conv_lstm(x, hidden_state)
         B_out, T_out, C_out, H_out, W_out = output.shape
 
-        output = output.view(B_out * T_out, C_out, H_out, W_out)
-        logits = self.decoder_conv(output)
+        if self.sequence_to_one:    # Output one fixation prediction for the whole sequence
+            last_step_output = output[:, -1, :, :, :]               # Get the last output in time
+            logits = self.decoder_conv(last_step_output)            # Decode into saliency scores
+            logits_flat = logits.view(B, -1)                        # flatten tensor per batch
+            probabilities = torch.log_softmax(logits_flat, dim=1)   # Use softmax to compute probabilities
+            prob_maps = probabilities.view(B, H_out, W_out)         # Re-shape back into 2D
+        else:                       # Output one fixation prediction per frame
+            output = output.view(B_out * T_out, C_out, H_out, W_out)    # Re-shape, cause Conv2D only supports 4D tensors
+            logits = self.decoder_conv(output)                          # Decode into saliency scores
+            logits_flat = logits.view(B, T, -1)                         # flatten per batch per time
+            probabilities = torch.log_softmax(logits_flat, dim=2)       # Use softmax to compute probabilities
+            prob_maps = probabilities.view(B, T, H_out, W_out)          # Reshape back into frames
 
-        logits_flat = logits.view(B, T, -1)
-        probabilities = torch.log_softmax(logits_flat, dim=2)
+        return prob_maps, new_hidden_state
 
-        prob_maps = probabilities.view(B, T, H_out, W_out)
-
-        return prob_maps
-
-    def train_evaluate(self):
-        # WRITE EVALUATE FUNCTION LATER
+    def train(self):
 
         # Define optimizer and err functions
         optimizer = optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         size = self.dataset_size
 
         self.train() # probably not necessary, but good practice
-        max_epochs = 50
 
-        # Train by number of epochs
-        for epoch in range(max_epochs):
-            if (epoch+1) % 5 == 0:
-                print(f"Training [Progress: {100 * ((epoch+1) / max_epochs):<2.0f}%]", end="")
+        for video_id, loader in self.train_loaders_dict.items():
 
-            # Train in batches
-            for batch, (X, y) in enumerate(self.train_loader):
+            hidden_state = None # want to carry the hidden state across samples, but not across videos
 
-                # Prepare data
-                X, y = X.to(self.device), y.to(self.device)
+            # Train by number of epochs
+            for epoch in range(self.max_epochs):
+                if (epoch+1) % 5 == 0:
+                    print(f"Training [Progress: {100 * ((epoch+1) / max_epochs):<2.0f}%]", end="")
 
-                # Calculate error
-                pred = self(X)
-                error = err_func(pred, y)
+                # Train in batches
+                for X_batch, y_batch in loader:
+                    optimizer.zero_grad() # set gradients to zero
 
-                # Backprop and update weights
-                error.backward()
-                optimizer.step()
-                optimizer.zero_grad()
+                    # Move data to device
+                    X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
+
+                    # Forward pass
+                    pred, hidden_state = self(X_batch, hidden_state)
+                    hidden_state = (hidden_state[0].detach(), hidden_state[1].detach())
+
+                    # Calculate the error
+                    error = err_func(pred, y)
+
+                    # Backprop and update weights
+                    error.backward()
+                    optimizer.step()
 
         return 0
 
     def loadData(self, data_dir):
+        # Load data from dataset
         processor = DataProcessor(data_dir)
-        self.X, self.y = processor.getData()
-        self.dataset_size, self.time_steps, self.channel_depth, self.frame_height, self.frame_width = self.X.shape
+        feature_dict, target_dict = processor.getData()
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.1)
+        # Get video ids and split for training and testing
+        video_ids = np.unique(feature_dict.keys())
+        train_ids, test_ids = train_test_split(video_ids, test_size=0.2, random_state=42)
 
-        X_train_tensor = torch.tensor(X_train.to_numpy(), dtype=torch.float32)
-        y_train_tensor = torch.tensor(y_train.to_numpy(), dtype=torch.float32)
-        train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=False)
+        # Dicts to store data loaders
+        self.train_loaders_dict = {}
+        self.test_loaders_dict = {}
 
-        X_test_tensor = torch.tensor(X_test.to_numpy(), dtype=torch.float32)
-        y_test_tensor = torch.tensor(y_test.to_numpy(), dtype=torch.float32)
-        test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
-        self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
+        def init_loader(video_ids, loader_dict):
+
+            for video_id in video_ids:
+
+                X_video = feature_dict[video_id]
+                y_video = target_dict[video_id]
+
+                X_samples = dataprocessor.chunkVideo(X_video)
+
+                tensor_x = torch.from_numpy(X_samples).float()
+                tensor_y = torch.from_numpy(y_video).float()
+                dataset = TensorDataset(tensor_x, tensor_y)
+
+                loader_dict[vid_id] = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
+
+        init_loader(train_ids, self.train_loaders_dict)
+        init_loader(test_ids, self.test_loaders_dict)
 
         return 0
 
@@ -132,18 +164,3 @@ class FixationPredictor(nn.Module):
         out.release()
         print("Video saved to {output_filename}")
 
-
-data_directory = "/path/to/data"
-model = FixationPredictor(data_directory)
-
-dummy_video_clip = torch.randn(1, model.time_steps, model.channel_depth, model.frame_height, model.frame_width)
-print(f"Input shape:    {dummy_video_clip.shape}")
-
-prob_maps = model(dummy_video_clip)
-print(f"Output maps shape: {prob_maps.shape}")
-
-model.writeVideo(prob_maps, "prediction.mp4")
-
-# Check that probabilities sum to 1
-one_map = prob_maps[0, 0] # First map of first batch
-print(f"Sum of probabilities: {one_map.sum().item()}")
