@@ -19,7 +19,7 @@ TODO:
 '''
 
 class FixationPredictor(nn.Module):
-    def __init__(self, data_directory, hidden_dim=32, kernel_size=(3, 3), layer_depth=1, batch_size=32, learning_rate=0.001, weight_decay=0.0001, max_epochs=50, sequence_to_one=True):
+    def __init__(self, data_directory, hidden_dim=32, kernel_size=(3, 3), layer_depth=1, batch_size=4, learning_rate=0.001, weight_decay=0.0001, max_epochs=10): #sequence_to_one=True):
         # Init Pytorch module
         super(FixationPredictor, self).__init__()
 
@@ -31,7 +31,8 @@ class FixationPredictor(nn.Module):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.max_epochs = max_epochs
-        self.sequence_to_one = sequence_to_one
+        #self.sequence_to_one = sequence_to_one
+
 
         # Load dataset (also sets some member variables)
         self.loadData(data_directory)
@@ -56,26 +57,27 @@ class FixationPredictor(nn.Module):
         output, new_hidden_state = self.conv_lstm(x, hidden_state)
         B_out, T_out, C_out, H_out, W_out = output.shape
 
-        if self.sequence_to_one:    # Output one fixation prediction for the whole sequence
-            last_step_output = output[:, -1, :, :, :]               # Get the last output in time
-            logits = self.decoder_conv(last_step_output)            # Decode into saliency scores
-            logits_flat = logits.view(B, -1)                        # flatten tensor per batch
-            probabilities = torch.log_softmax(logits_flat, dim=1)   # Use softmax to compute probabilities
-            prob_maps = probabilities.view(B, H_out, W_out)         # Re-shape back into 2D
-        else:                       # Output one fixation prediction per frame
-            output = output.view(B_out * T_out, C_out, H_out, W_out)    # Re-shape, cause Conv2D only supports 4D tensors
-            logits = self.decoder_conv(output)                          # Decode into saliency scores
-            logits_flat = logits.view(B, T, -1)                         # flatten per batch per time
-            probabilities = torch.log_softmax(logits_flat, dim=2)       # Use softmax to compute probabilities
-            prob_maps = probabilities.view(B, T, H_out, W_out)          # Reshape back into frames
+        # if self.sequence_to_one:    # Output one fixation prediction for the whole sequence
+        last_step_output = output[:, -1, :, :, :]                   # Get the last output in time
+        logits = self.decoder_conv(last_step_output)                # Decode into saliency scores
+        logits_flat = logits.view(B, -1)                            # flatten tensor per batch
+        log_probabilities = torch.log_softmax(logits_flat, dim=1)   # Use softmax to compute log probabilities
+        probabilities = torch.exp(log_probabilities)                # Convert log probs to probs
+        prob_maps = probabilities.view(B, H_out, W_out)             # Re-shape back into 2D
+        # else:                       # Output one fixation prediction per frame
+        #     output = output.view(B_out * T_out, C_out, H_out, W_out)    # Re-shape, cause Conv2D only supports 4D tensors
+        #     logits = self.decoder_conv(output)                          # Decode into saliency scores
+        #     logits_flat = logits.view(B, T, -1)                         # flatten per batch per time
+        #     probabilities = torch.log_softmax(logits_flat, dim=2)       # Use softmax to compute probabilities
+        #     prob_maps = probabilities.view(B, T, H_out, W_out)          # Reshape back into frames
 
         return prob_maps, new_hidden_state
 
-    def train(self):
+    def fit(self):
 
         # Define optimizer and err functions
-        optimizer = optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        size = self.dataset_size
+        optimizer = optim.Adam(self.conv_lstm.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        err_func = nn.MSELoss()
 
         self.train() # probably not necessary, but good practice
 
@@ -86,7 +88,7 @@ class FixationPredictor(nn.Module):
             # Train by number of epochs
             for epoch in range(self.max_epochs):
                 if (epoch+1) % 5 == 0:
-                    print(f"Training [Progress: {100 * ((epoch+1) / max_epochs):<2.0f}%]", end="")
+                    print(f"\rTraining [Progress: {100 * (epoch / self.max_epochs):<2.0f}%]", end="", flush=True)
 
                 # Train in batches
                 for X_batch, y_batch in loader:
@@ -97,25 +99,71 @@ class FixationPredictor(nn.Module):
 
                     # Forward pass
                     pred, hidden_state = self(X_batch, hidden_state)
-                    hidden_state = (hidden_state[0].detach(), hidden_state[1].detach())
+                    hidden_state = [(h.detach(), c.detach()) for h, c in hidden_state]
 
                     # Calculate the error
-                    error = err_func(pred, y)
+                    error = err_func(pred, y_batch)
 
                     # Backprop and update weights
                     error.backward()
                     optimizer.step()
 
+        print(f"\rTraining [Progress: {100 * (epoch / self.max_epochs):<2.0f}%]")
+        print("TRAINING COMPLETE")
         return 0
+
+    # def test(self):
+    #
+    #     for video_id, loader in self.test_loaders_dict.items():
+
+    def infer(self, features_dir, output_file="./prediction.mp4"):
+        self.eval()
+
+        feature_numpy = self.processor.loadFeatures(features_dir)
+        feature_samples = dataprocessor.chunkVideo(feature_numpy, self.processor.frames_per_sequence)
+
+        tensor = torch.from_numpy(feature_samples).float()
+        num_sequences, t_seq, c, h, w = tensor.shape
+
+        output_frames = []
+        hidden_state = None
+
+        with torch.no_grad():
+            for sequence in range(num_sequences):
+
+                batch = tensor[sequence].unsqueeze(0).to(self.device)
+                output_map, hidden_state = self(batch, hidden_state)
+
+                prediction = output_map.unsqueeze(1).repeat(1, t_seq, 1, 1) # repeat predictions for whole sequence/chunk
+
+                output_frames.append(prediction.cpu())
+
+        full_video_tensor = torch.cat(output_frames, dim=1) # concat along time dimension
+
+        print(f"Saving video to {output_file}")
+        self.writeVideo(full_video_tensor, output_file)
+
+        self.train()
+
+        return full_video_tensor
+
+
+    # def evaluate()
 
     def loadData(self, data_dir):
         # Load data from dataset
-        processor = DataProcessor(data_dir)
-        feature_dict, target_dict = processor.getData()
+        self.processor = DataProcessor(data_dir)
+        feature_dict, target_dict = self.processor.getData()
 
         # Get video ids and split for training and testing
-        video_ids = np.unique(feature_dict.keys())
-        train_ids, test_ids = train_test_split(video_ids, test_size=0.2, random_state=42)
+        video_ids = list(feature_dict.keys())
+
+        if len(video_ids) > 0:
+            self.channel_depth = feature_dict[video_ids[0]].shape[1]
+        else:
+            raise ValueError("DataProcessor did not load any data")
+
+        train_ids, test_ids = train_test_split(video_ids, test_size=0.333, random_state=42)
 
         # Dicts to store data loaders
         self.train_loaders_dict = {}
@@ -128,13 +176,18 @@ class FixationPredictor(nn.Module):
                 X_video = feature_dict[video_id]
                 y_video = target_dict[video_id]
 
-                X_samples = dataprocessor.chunkVideo(X_video)
+                X_samples = dataprocessor.chunkVideo(X_video, self.processor.frames_per_sequence)
+
+                # ensure tensors have the compatible shapes
+                if X_samples.shape[0] != y_video.shape[0]:
+                    X_samples = X_samples[:-1]
 
                 tensor_x = torch.from_numpy(X_samples).float()
                 tensor_y = torch.from_numpy(y_video).float()
+
                 dataset = TensorDataset(tensor_x, tensor_y)
 
-                loader_dict[vid_id] = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
+                loader_dict[video_id] = DataLoader(dataset, batch_size=self.batch_size, shuffle=False, drop_last=True)
 
         init_loader(train_ids, self.train_loaders_dict)
         init_loader(test_ids, self.test_loaders_dict)

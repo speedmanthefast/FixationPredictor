@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import os
+import ffmpeg
 
 '''
 TODO
@@ -34,58 +35,11 @@ root
 ###### HELPER FUNCTIONS #######
 ###############################
 
-def loadVideo(video_path):
-    video = cv2.VideoCapture(video_path)
-
-    video = openVideo(video_path)
-    if video is None:
-        raise IOError("Could not open video")
-
-    frame_list = []
-    while True:
-        # read a frame
-        ret, frame = cap.read()
-
-        # Exit if eof
-        if not ret:
-            break
-
-        resized_frame = self.resizeFrame(frame)
-        gray_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
-
-        # (H, W, C) => (C, H, W)
-        #frame = np.transpose(gray_frame, axes=(2, 0, 1))
-        frame_list.append(gray_frame)
-
-    # Now array will be (T, H, W)
-    video.release()
-    video_original = np.stack(frame_list, axis=0)
-
-    video_padded = self.padVideo(video_original)
-
-    return video_padded
-
-def loadImages(self, image_dir):
-    items = os.listdir(image_dir)
-    images = []
-    for item in items:
-        image = cv2.imread(item, cv2.IMREAD_GRAYSCALE) / 255
-        if image is None:
-            return None
-
-        image = resizeFrame(image)
-        if not image is None:
-            images.append(image)
-
-    images_original = np.stack(images, axis=0)
-    images_padded = padVideo(images_original)
-    return images_padded
-
 # Input: a numpy array representing an image
 # Output: A new numpy array representing the same image but scaled to the target dimensions
-def resizeFrame(frame, padColor=0):
+def resizeFrame(frame, target_dim, padColor=0):
     original_h, original_w = frame.shape[:2]
-    target_w, target_h = self.target_dim
+    target_w, target_h = target_dim
 
     # Calculate the scaling ratio
     ratio = min(target_w / original_w, target_h / original_h)
@@ -114,10 +68,10 @@ def resizeFrame(frame, padColor=0):
 # Takes a numpy array and pads it to ensure the time dimension is divisible by the sequence sequence_length
 # Input: numpy array of size (T_original, H, W)
 # Output: numpy array of size (T_padded, H, W)
-def padVideo(video):
+def padVideo(video, frames_per_sequence):
     T_original, H, W = video.shape
 
-    padded_frames = T_original % self.frames_per_sequence
+    padded_frames = (frames_per_sequence - (T_original % frames_per_sequence)) % frames_per_sequence
 
     if padded_frames == 0:
         return video
@@ -130,18 +84,42 @@ def padVideo(video):
 
 # Takes (T_full, H, W) as input
 # Outputs (S, T_chunk, H, W)
-def chunkVideo(X):
+def chunkVideo(X, frames_per_sequence):
     T_full, C, H, W = X.shape
 
     # Make sure the full video can be sequenced evenly
-    if T_full % self.frames_per_sequence != 0:
-        raise ValueError(f"Total frames in the video ({T_full}) must be evenly divisible by frames per sequence ({self.frames_per_sequence})")
+    if T_full % frames_per_sequence != 0:
+        raise ValueError(f"Total frames in the video ({T_full}) must be evenly divisible by frames per sequence ({frames_per_sequence})")
 
     # Reshape to turn time scale into consistent sequences
-    S = T_full // self.frames_per_sequence
-    sequenced_video = X.reshape(S, self.frames_per_sequence, C, H, W)
+    S = T_full // frames_per_sequence
+    sequenced_video = X.reshape(S, frames_per_sequence, C, H, W)
 
     return sequenced_video
+
+def toFPS(video_path, fps=30):
+    basename = os.path.basename(video_path)
+    dirname = os.path.dirname(video_path)
+    new_video_path = f"{dirname}/filtered_{basename}"
+
+    # check if the filtered video does not exist
+    if not os.path.exists(new_video_path):
+        ffmpeg.input(video_path).filter('fps', fps=fps).output(new_video_path).run()
+
+    # if it does exist, check if it is already at the target FPS
+    else:
+        cap = cv2.VideoCapture(new_video_path)
+        if not cap.isOpened():
+            raise IOError(f"Error opening video file at {new_video_path}")
+
+        vid_fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+
+        if fps != vid_fps:
+            ffmpeg.input(video_path).filter('fps', fps=fps).output(new_video_path).run()
+
+    return new_video_path
+
 
 ##################################################################
 
@@ -166,7 +144,7 @@ class DataProcessor:
     def loadTarget(self, target_dir):
 
         target_paths = os.listdir(target_dir)
-        target_path = target_path[0]
+        target_path = target_paths[0]
 
         _, target_extension = os.path.splitext(target_path)
         if target_extension in self.VIDEO_EXTENSIONS:
@@ -188,19 +166,17 @@ class DataProcessor:
 
             _, heatmap_extension = os.path.splitext(heatmap_path)
             if heatmap_extension in self.VIDEO_EXTENSIONS:
-                feature_list.append(loadVideo(os.path.join(feature_dir, heatmap_path)))
+                feature_list.append(self.loadVideo(os.path.join(feature_dir, heatmap_path)))
             elif heatmap_extension in self.IMAGE_EXTENSIONS:
-                feature_list.append(loadImages(feature_dir))
+                feature_list.append(self.loadImages(feature_dir))
 
-        # feature_list is now a list of (T, H, W), want to combine along channel dimension and chunk the video
+        # feature_list is now a list of (T, H, W), want to combine along channel dimension
         video_full = np.stack(feature_list, axis=1)
-        sequenced_video = self.chunkVideo(video_full)
-        return sequenced_video
+        #sequenced_video = chunkVideo(video_full, self.frames_per_sequence)
+        return video_full
 
 
     def loadDataset(self, dataset_dir):
-        X = None
-        y = None
 
         # Lists to store features and targets before stacking
         feature_dict = {} # maps video id to feature array
@@ -215,7 +191,7 @@ class DataProcessor:
 
             X_datapoint = None
             y_datapoint = None
-            datapoint_path = os.path.join(dataset_dir, datapoint)
+            datapoint_path = os.path.join(dataset_dir, video_path)
 
             # Skip files
             if os.path.isfile(datapoint_path):
@@ -242,7 +218,62 @@ class DataProcessor:
             feature_dict[video_id] = X_datapoint
             target_dict[video_id] = y_datapoint
 
+        print(f"Loaded dataset from {dataset_dir} into feature dictionary with size {len(feature_dict.keys())} and target dictionary with size {len(target_dict.keys())}")
         return (feature_dict, target_dict)
+
+    def loadVideo(self, video_path, fps=30):
+        new_video_path = toFPS(video_path, fps)
+
+        video = cv2.VideoCapture(new_video_path)
+        if video is None:
+            raise IOError("Could not open video")
+
+        frame_list = []
+        while True:
+            # read a frame
+            ret, frame = video.read()
+
+            # Exit if eof
+            if not ret:
+                break
+
+            resized_frame = resizeFrame(frame, self.target_dim)
+            gray_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
+
+            # (H, W, C) => (C, H, W)
+            #frame = np.transpose(gray_frame, axes=(2, 0, 1))
+            frame_list.append(gray_frame / 255)
+
+        # Now array will be (T, H, W)
+        video.release()
+        video_original = np.stack(frame_list, axis=0)
+
+        video_padded = padVideo(video_original, self.frames_per_sequence)
+
+        print(f"Loaded video from {video_path} with dimensions {video_padded.shape}")
+
+        return video_padded
+
+    def loadImages(self, image_dir):
+        items = os.listdir(image_dir)
+        images = []
+        for item in items:
+            item_fullpath = os.path.join(image_dir, item)
+            image = cv2.imread(item_fullpath, cv2.IMREAD_GRAYSCALE)
+            if image is None:
+                raise IOError(f"Error: Could not load image at {item_fullpath}")
+
+            image = image / 255
+            image = resizeFrame(image, self.target_dim)
+            if image is not None:
+                images.append(image)
+
+        images_original = np.stack(images, axis=0)
+        images_padded = images_original#padVideo(images_original, self.frames_per_sequence)
+
+        print(f"Loaded images from {image_dir} with dimensions {images_padded.shape}")
+
+        return images_padded
 
 class TargetNotFoundException(Exception):
     def __init__(self, message="An error occured when loading the targets"):
