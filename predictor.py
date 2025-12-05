@@ -1,15 +1,11 @@
-import convlstm
 import dataprocessor
 from dataprocessor import DataProcessor
 from convlstm import ConvLSTM
 import numpy as np
-import pandas as pd
 import torch
-import os
 from torch import nn
 from torch import optim
 from torch.utils.data import DataLoader, TensorDataset
-from torchvision import datasets, transforms
 import cv2
 from sklearn.model_selection import train_test_split
 
@@ -207,7 +203,7 @@ class FixationPredictor(nn.Module):
         out = cv2.VideoWriter(output_filename, fourcc, fps, frame_size, isColor=False)
 
         if not out.isOpened():
-            print(f"Error: Could not write video")
+            print("Error: Could not write video")
             return
 
         for i in range(num_frames):

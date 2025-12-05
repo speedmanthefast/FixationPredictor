@@ -1,12 +1,6 @@
 # this repo used as a guide: https://github.com/ndrplz/ConvLSTM_pytorch/blob/master/convlstm.py
-
-import pandas as pd
-import numpy as np
 import torch
 from torch import nn
-from torch import optim
-from torch.utils.data import DataLoader, TensorDataset
-from torchvision import datasets, transforms
 
 class ConvLSTMCell(nn.Module):
     def __init__(self, input_dim, hidden_dim, kernel_size, bias=True):
