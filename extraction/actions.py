@@ -6,7 +6,7 @@ import numpy as np
 import os
 import torch.nn.functional as F
 
-def extract_actions(input_video_path, output_path):
+def extract_actions(input_video_path, output_path, verbose=False):
     # ----------------------
     # Paths
     # ----------------------
@@ -93,6 +93,11 @@ def extract_actions(input_video_path, output_path):
 
             # Normalize and convert
             cam_frame = cam[0]
+
+            # Apply thresholding
+            low, high = np.percentile(cam_frame, (70, 99))  # tune these if you want
+            cam_frame = np.clip(cam_frame, low, high)
+
             # Normalize normally
             cam_frame = (cam_frame - cam_frame.min()) / (cam_frame.max() - cam_frame.min() + 1e-8)
 
@@ -109,9 +114,9 @@ def extract_actions(input_video_path, output_path):
             cam_color_resized = cv2.resize(cam_color, (orig_w, orig_h))  # <-- key line
 
             for i in range(window_size):
-                orig_frame = frames[start + i]
-                overlay = cv2.addWeighted(orig_frame, 0.6, cam_color_resized, 0.4, 0)
-                overlay_frames.append(np.uint8(overlay))
+                #orig_frame = frames[start + i]
+                #overlay = cv2.addWeighted(orig_frame, 0.6, cam_color_resized, 0.4, 0)
+                #overlay_frames.append(np.uint8(overlay))
                 cam_only_frames.append(np.uint8(cam_color_resized))
 
         # ----------------------
@@ -123,13 +128,13 @@ def extract_actions(input_video_path, output_path):
         cam_only_out = cv2.VideoWriter(output_path,
                                     cv2.VideoWriter_fourcc(*'mp4v'), fps, (orig_w, orig_h))
 
-        for i in range(len(overlay_frames)):
+        for i in range(len(cam_only_frames)):
             #overlay_out.write(cv2.cvtColor(overlay_frames[i], cv2.COLOR_RGB2BGR))
             cam_only_out.write(cv2.cvtColor(cam_only_frames[i], cv2.COLOR_RGB2BGR))
 
         #overlay_out.release()
         cam_only_out.release()
-        print(f"Processed {basename} ({len(overlay_frames)} frames) at original resolution ({orig_w}x{orig_h})")
+        print(f"Processed {basename} ({len(cam_only_frames)} frames) at original resolution ({orig_w}x{orig_h})")
 
     # ----------------------
     # Batch process all videos

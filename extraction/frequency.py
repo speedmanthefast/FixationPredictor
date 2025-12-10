@@ -12,7 +12,7 @@ try:
 except Exception:
     tqdm = lambda x, **kw: x  # fallback: identity iterator
 
-def extract_frequency(input_video_path, input_audio_path, output_path):
+def extract_frequency(input_video_path, input_audio_path, output_path, verbose=False):
     # A-weighting (numerically safe) - (keep as is)
     def a_weighting_db(freqs_hz):
         """Return A-weighting in dB for array freqs_hz (numerically safe)."""
@@ -102,6 +102,9 @@ def extract_frequency(input_video_path, input_audio_path, output_path):
                     P = np.abs(Sdir) ** 2
                     Pw = P * A_lin
                     heat[i_phi, j_theta] = 10.0 * np.log10(np.sum(Pw) + 1e-20)
+
+                    inverse_scale = 20      #if you want the maps to be smaller/more accurate increase this number (10 was too low so I upped it to 20)
+                    heat[heat < (heat.max() - heat.max() / inverse_scale)] = 0
 
             heatmaps.append(heat)
 

@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import os
+from videohelpers import resizeFrame, padVideo, gaussian_smooth
 import ffmpeg
 
 '''
@@ -31,110 +32,27 @@ root
 |-> video_id_2
 '''
 
-###############################
-###### HELPER FUNCTIONS #######
-###############################
-
-# Input: a numpy array representing an image
-# Output: A new numpy array representing the same image but scaled to the target dimensions
-def resizeFrame(frame, target_dim, padColor=0):
-    original_h, original_w = frame.shape[:2]
-    target_w, target_h = target_dim
-
-    # Calculate the scaling ratio
-    ratio = min(target_w / original_w, target_h / original_h)
-
-    # Calculate new dimensions
-    new_w = int(original_w * ratio)
-    new_h = int(original_h * ratio)
-
-    # Resize frame
-    interp = cv2.INTER_AREA if ratio < 1 else cv2.INTER_LINEAR
-    resized_frame = cv2.resize(frame, (new_w, new_h), interpolation=interp)
-
-    # Calculate padding
-    delta_w = target_w - new_w
-    delta_h = target_h - new_h
-
-    top = delta_h // 2
-    bottom = delta_h - top
-    left = delta_w // 2
-    right = delta_w - left
-
-    padded_frame = cv2.copyMakeBorder(resized_frame, top, bottom, left, right, cv2.BORDER_CONSTANT, value=padColor)
-
-    return padded_frame
-
-# Takes a numpy array and pads it to ensure the time dimension is divisible by the sequence sequence_length
-# Input: numpy array of size (T_original, H, W)
-# Output: numpy array of size (T_padded, H, W)
-def padVideo(video, frames_per_sequence):
-    T_original, H, W = video.shape
-
-    padded_frames = (frames_per_sequence - (T_original % frames_per_sequence)) % frames_per_sequence
-
-    if padded_frames == 0:
-        return video
-
-    padding = np.zeros((padded_frames, H, W))
-
-    video_full = np.concatenate((video, padding), axis=0)
-
-    return video_full
-
-# Takes (T_full, H, W) as input
-# Outputs (S, T_chunk, H, W)
-def chunkVideo(X, frames_per_sequence):
-    T_full, C, H, W = X.shape
-
-    # Make sure the full video can be sequenced evenly
-    if T_full % frames_per_sequence != 0:
-        raise ValueError(f"Total frames in the video ({T_full}) must be evenly divisible by frames per sequence ({frames_per_sequence})")
-
-    # Reshape to turn time scale into consistent sequences
-    S = T_full // frames_per_sequence
-    sequenced_video = X.reshape(S, frames_per_sequence, C, H, W)
-
-    return sequenced_video
-
-def toFPS(video_path, fps=30):
-    basename = os.path.basename(video_path)
-    dirname = os.path.dirname(video_path)
-    new_video_path = f"{dirname}/filtered_{basename}"
-
-    # check if the filtered video does not exist
-    if not os.path.exists(new_video_path):
-        ffmpeg.input(video_path).filter('fps', fps=fps).output(new_video_path).run()
-
-    # if it does exist, check if it is already at the target FPS
-    else:
-        cap = cv2.VideoCapture(new_video_path)
-        if not cap.isOpened():
-            raise IOError(f"Error opening video file at {new_video_path}")
-
-        vid_fps = cap.get(cv2.CAP_PROP_FPS)
-        cap.release()
-
-        if fps != vid_fps:
-            ffmpeg.input(video_path).filter('fps', fps=fps).output(new_video_path).run()
-
-    return new_video_path
-
+# Need to ensure the following
+#   - All features have same shape (T, H, W)
+#   - Number of sequences in features matches number of targets
+#   - Time scale of features are all the same
+#   - Chunking breaks features into 1 second sequences
 
 ##################################################################
 
 class DataProcessor:
-    def __init__(self, directory, dim=(128, 256), fps=30, sequence_length=1):
+    def __init__(self, features, dim=(256, 128), fps=8, sequence_length=3, target_smoothing_gaussian=20, debug=True):
         self.IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
         self.VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv'}
-        self.directory = directory              # The directory to pull data from
         self.target_dim = dim                   # The height x width to resize data to
         self.fps = fps                          # the frame->time scale of the data
         self.sequence_length = sequence_length  # the amount of data to give to the predictor in seconds
+        self.active_features = features         # Determines the features that will be loaded
+        self.target_smoothing_gaussian = target_smoothing_gaussian # the sigma value for gaussian smoothing on fixation maps
+        self.debug = debug
 
         self.frames_per_sequence = self.fps * self.sequence_length  # The number of frames to serve in a sequence
-
-        self.feature_dict, self.target_dict = self.loadDataset(directory)
+        self.loaded_features = []
 
     def getData(self):
         return (self.feature_dict, self.target_dict)
@@ -145,34 +63,75 @@ class DataProcessor:
 
         target_paths = os.listdir(target_dir)
         target_path = target_paths[0]
+        raw_target = None
 
         _, target_extension = os.path.splitext(target_path)
-        if target_extension in self.VIDEO_EXTENSIONS:
-            return self.loadVideo(os.path.join(target_dir, target_path))
-        elif target_extension in self.IMAGE_EXTENSIONS:
-            return self.loadImages(target_dir)
+        # if target_extension in self.VIDEO_EXTENSIONS:
+        #     raw_target = self.loadVideo(os.path.join(target_dir, target_path))
+        if target_extension in self.IMAGE_EXTENSIONS:
+            raw_target =  self.loadImages(target_dir)
+
+        if raw_target is not None:
+            print(f"Smoothing targets for {target_dir}")
+            smoothed_target = raw_target#gaussian_smooth(raw_target, sigma=self.target_smoothing_gaussian)
+
+            resized_frames = []
+            for i in range(smoothed_target.shape[0]):
+                frame = smoothed_target[i]
+                resized_frame = resizeFrame(frame, self.target_dim)
+                resized_frames.append(resized_frame)
+
+            return np.stack(resized_frames, axis=0)
+
+        return raw_target
 
     # Loads a set of features stored as videos or sets of images
-    # Should return (S, frames_per_sequence, C, H, W)
     def loadFeatures(self, features_dir):
         feature_list = []
 
         features = os.listdir(features_dir)
         for feature in features:
+
+            # Only load chosen features (must match directory name)
+            if feature not in self.active_features:
+                continue
+            else:
+                self.loaded_features.append(feature)
+
+            print(f"Loading feature: {feature}")
+
             feature_dir = os.path.join(features_dir, feature)
 
-            heatmap_paths = os.listdir(feature_dir)
-            heatmap_path = heatmap_paths[0]
+            if not os.path.isdir(feature_dir):
+                continue
 
-            _, heatmap_extension = os.path.splitext(heatmap_path)
-            if heatmap_extension in self.VIDEO_EXTENSIONS:
-                feature_list.append(self.loadVideo(os.path.join(feature_dir, heatmap_path)))
-            elif heatmap_extension in self.IMAGE_EXTENSIONS:
-                feature_list.append(self.loadImages(feature_dir))
+            video_paths = os.listdir(feature_dir)
+            for video_path in video_paths:
 
-        # feature_list is now a list of (T, H, W), want to combine along channel dimension
-        video_full = np.stack(feature_list, axis=1)
-        #sequenced_video = chunkVideo(video_full, self.frames_per_sequence)
+                root, ext = os.path.splitext(video_path)
+                if ext in self.VIDEO_EXTENSIONS:
+                    # Load the raw video data
+                    raw_data = self.loadVideo(os.path.join(feature_dir, video_path))
+
+                    # Normalize data
+                    # f_min, f_max = raw_data.min(), raw_data.max()
+                    #
+                    # # Avoid divide by zero
+                    # if f_max - f_min > 1e-7:
+                    #     # Stretch values to be between 0 and 1
+                    #     normalized_data = (raw_data - f_min) / (f_max - f_min)
+                    # else:
+                    #     normalized_data = raw_data
+
+                    #feature_list.append(normalized_data)
+                    feature_list.append(raw_data)
+                # elif heatmap_extension in self.IMAGE_EXTENSIONS:
+                #     feature_list.append(self.loadImages(feature_dir))
+
+        # feature_list is now a list of (T, H, W), want to combine along channel dimension. First need to ensure all features have same T
+        min_shape = np.min([feature.shape[0] for feature in feature_list], axis=0) # Find the minimum shape across all arrays
+        cropped = [feature[:min_shape, :, :] for feature in feature_list] # Crop each array to that shape
+        video_full = np.stack(cropped, axis=1)
         return video_full
 
 
@@ -219,61 +178,199 @@ class DataProcessor:
             target_dict[video_id] = y_datapoint
 
         print(f"Loaded dataset from {dataset_dir} into feature dictionary with size {len(feature_dict.keys())} and target dictionary with size {len(target_dict.keys())}")
-        return (feature_dict, target_dict)
 
-    def loadVideo(self, video_path, fps=30):
-        new_video_path = toFPS(video_path, fps)
+        if self.debug:
+            print("Rendering debug dataset... please wait")
+            self.debug_dataset(feature_dict, target_dict)
 
-        video = cv2.VideoCapture(new_video_path)
-        if video is None:
-            raise IOError("Could not open video")
+        self.feature_dict, self.target_dict = feature_dict, target_dict
 
-        frame_list = []
-        while True:
-            # read a frame
-            ret, frame = video.read()
+    def validate_data(self, video_id, feature_numpy, target_numpy):
 
-            # Exit if eof
-            if not ret:
-                break
+        print(f"Validating data shape for {video_id}")
 
-            resized_frame = resizeFrame(frame, self.target_dim)
-            gray_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
+        feature_samples = feature_numpy.shape[0]
+        target_samples = target_numpy.shape[0]
 
-            # (H, W, C) => (C, H, W)
-            #frame = np.transpose(gray_frame, axes=(2, 0, 1))
-            frame_list.append(gray_frame / 255)
+        if feature_samples > target_samples:
+            print(f"Dropping {feature_samples - target_samples} feature samples for {video_id}")
+            feature_numpy = feature_numpy[:target_samples]
+        elif target_samples > feature_samples:
+            print(f"Dropping {target_samples - feature_samples} target samples for {video_id}")
+            target_numpy = target_numpy[:feature_samples]
 
-        # Now array will be (T, H, W)
-        video.release()
-        video_original = np.stack(frame_list, axis=0)
+        return feature_numpy, target_numpy
 
-        video_padded = padVideo(video_original, self.frames_per_sequence)
+    # def loadVideo(self, video_path):
+    #     target_fps = self.fps
+    #     cap = cv2.VideoCapture(video_path)
+    #
+    #     if not cap.isOpened():
+    #         print(f"Error: Could not open video at {video_path}")
+    #         return None
+    #
+    #     # Get original metadata
+    #     original_fps = cap.get(cv2.CAP_PROP_FPS)
+    #
+    #     # Read all frames into memory
+    #     # Note: OpenCV reads images in BGR format.
+    #     frames = []
+    #     while True:
+    #         ret, frame = cap.read()
+    #         if not ret:
+    #             break
+    #
+    #         # print(f"Resizing {frame.shape} to {self.target_dim}")
+    #         resized_frame = resizeFrame(frame, self.target_dim)
+    #         gray_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
+    #         frames.append(gray_frame / 255)
+    #
+    #     cap.release()
+    #
+    #     # Convert list to numpy array (Source Video)
+    #     # Shape: (Original_Frames, H, W, C)
+    #     source_array = np.array(frames)
+    #
+    #     original_frame_count = len(source_array)
+    #
+    #     # Calculate the new number of frames required
+    #     duration = original_frame_count / original_fps
+    #     target_frame_count = int(duration * target_fps)
+    #
+    #     print(f"Resampling from {original_fps} FPS ({original_frame_count} frames) "
+    #         f"to {target_fps} FPS ({target_frame_count} frames).")
+    #
+    #     # Re-sample video to meet target FPS
+    #     if target_frame_count > 0:
+    #         indices = np.arange(target_frame_count) * (original_fps / target_fps)
+    #         indices = indices.astype(int)
+    #
+    #         # Clip indices to ensure we don't exceed bounds (safety for rounding errors)
+    #         indices = np.clip(indices, 0, original_frame_count - 1)
+    #
+    #         # Use NumPy advanced indexing to create the new array instantly
+    #         output_array = source_array[indices]
+    #         video_padded = padVideo(output_array, self.frames_per_sequence)
+    #
+    #         print(f"Loaded video from {video_path} with dimensions {video_padded.shape}")
+    #         return video_padded
+    #     else:
+    #         return np.array([])
 
-        print(f"Loaded video from {video_path} with dimensions {video_padded.shape}")
+    def loadVideo(self, video_path):
+        target_w, target_h = self.target_dim
 
-        return video_padded
+        try:
+            # use ffmpeg for MUCH faster data loading
+            out, _ = (
+                ffmpeg
+                .input(video_path)
+                .filter('fps', fps=self.fps, round='up') # drop frames
+                .filter('scale', target_w, target_h) # resize frames
+                .output('pipe:', format='rawvideo', pix_fmt='gray') # convert to gray scale
+                .run(capture_stdout=True, quiet=True)
+            )
+
+            # Import directy from numpy to buffer
+            video = np.frombuffer(out, np.uint8)
+
+            # Reshape from flat buffer to (T, H, W)
+            video = video.reshape([-1, target_h, target_w]) # use -1 for T because we don't know the frame count yet
+
+            # normalize and pad so the video can be properly chunked later
+            video = video.astype(np.float32) / 255.0
+            video_padded = padVideo(video, self.frames_per_sequence)
+
+            print(f"Loaded video from {video_path} with dimensions {video_padded.shape}")
+            return video_padded
+
+        except ffmpeg.Error as e:
+            print(f"Error loading video {video_path}: {e}")
+            return np.array([])
 
     def loadImages(self, image_dir):
         items = os.listdir(image_dir)
+        items.sort()
         images = []
         for item in items:
             item_fullpath = os.path.join(image_dir, item)
+            print(f"Reading image at {item_fullpath}")
             image = cv2.imread(item_fullpath, cv2.IMREAD_GRAYSCALE)
             if image is None:
                 raise IOError(f"Error: Could not load image at {item_fullpath}")
 
-            image = image / 255
-            image = resizeFrame(image, self.target_dim)
+            image = image.astype(np.float32) / 255.0
             if image is not None:
                 images.append(image)
 
         images_original = np.stack(images, axis=0)
-        images_padded = images_original#padVideo(images_original, self.frames_per_sequence)
+        images_padded = padVideo(images_original, self.frames_per_sequence)
 
         print(f"Loaded images from {image_dir} with dimensions {images_padded.shape}")
 
         return images_padded
+
+    def debug_dataset(self, feature_dict, target_dict):
+
+        video_ids = feature_dict.keys()
+
+        for video_id in video_ids:
+
+            output_dir = os.path.join("./debug", video_id)
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+
+            self.save_numpy_as_video(feature_dict[video_id], output_dir)
+            self.save_numpy_as_video(target_dict[video_id], output_dir)
+
+    def save_numpy_as_video(self, data, output_dir):
+
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        is_target = False
+        fps = self.fps
+
+        # Standardize input to (T, C, H, W)
+        if data.ndim == 3:
+            # Case (T, H, W) -> add channel dim -> (T, 1, H, W)
+            data = np.expand_dims(data, axis=1)
+            is_target = True
+        elif data.ndim != 4:
+            raise ValueError(f"Data must be (T, H, W) or (T, C, H, W). Got shape {data.shape}")
+
+        T, C, H, W = data.shape
+
+        # Iterate over each channel
+        for c in range(C):
+
+            # Determine filename
+            if is_target:
+                filename = "target.mp4"
+            else:
+                filename = f"{self.loaded_features[c]}.mp4"
+
+            save_path = os.path.join(output_dir, filename)
+
+            # Initialize VideoWriter
+            # Note: OpenCV expects size as (Width, Height)
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(save_path, fourcc, fps, (W, H))
+
+            for t in range(T):
+                frame_norm = data[t, c]
+
+                # User requested scaling
+                # Assumes frame_norm is float 0.0 - 1.0
+                heatmap_uint8 = (frame_norm * 255).astype(np.uint8)
+
+                # Convert Grayscale to BGR for compatibility
+                frame_bgr = cv2.cvtColor(heatmap_uint8, cv2.COLOR_GRAY2BGR)
+
+                out.write(frame_bgr)
+
+            out.release()
+            print(f"Saved {save_path}")
 
 class TargetNotFoundException(Exception):
     def __init__(self, message="An error occured when loading the targets"):
@@ -284,81 +381,3 @@ class FeaturesNotFoundException(Exception):
     def __init__(self, message="An error occured when loading the features"):
         self.message = message
         super().__init__(self.message)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-###############################
-########## DEBUGGING ##########
-###############################
-
-# def write_grayscale_video(numpy_video, output_filename, fps=30):
-#     """
-#     Writes a (T, H, W) grayscale NumPy array to a video file.
-#
-#     Args:
-#         numpy_video (np.array): Input array of shape (T, H, W).
-#                                 Assumes values are uint8 (0-255).
-#         output_filename (str): Path to save the output video (e.g., 'output.mp4').
-#         fps (int): Frames per second for the output video.
-#     """
-#
-#     # 1. Check if data is not already 0-255 uint8
-#     if numpy_video.dtype != np.uint8:
-#         print("Warning: Data is not uint8. Scaling from [0, 1] to [0, 255].")
-#         if numpy_video.max() <= 1.0 and numpy_video.min() >= 0.0:
-#             numpy_video = (numpy_video * 255).astype(np.uint8)
-#         else:
-#             # As a fallback, just convert type
-#             numpy_video = numpy_video.astype(np.uint8)
-#
-#     # 2. Get dimensions
-#     num_frames, height, width = numpy_video.shape
-#
-#     # 3. Define video properties
-#     frame_size = (width, height) # OpenCV uses (Width, Height)
-#
-#     # We will write a color video (isColor=True) for better compatibility
-#     # 'mp4v' is the codec for .mp4 files
-#     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-#
-#     # 4. Initialize VideoWriter
-#     out = cv2.VideoWriter(output_filename, fourcc, fps, frame_size, isColor=True)
-#
-#     if not out.isOpened():
-#         print(f"Error: Could not open video writer for {output_filename}")
-#         return
-#
-#     # 5. Loop and Write
-#     for i in range(num_frames):
-#         # Get the single grayscale frame (H, W)
-#         frame_gray = numpy_video[i, :, :]
-#
-#         # Convert the grayscale frame (H, W) to a BGR frame (H, W, 3)
-#         frame_bgr = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
-#
-#         # Write the BGR frame
-#         out.write(frame_bgr)
-#
-#     # 6. Release
-#     out.release()
-#     print(f"Video saved successfully to {output_filename}")
-#
-#
-# if __name__ == "__main__":
-#     processor = DataProcessor("./fakeyfakedirectory")
-#     video = processor.loadImages("/home/speedman/Projects/School Programs/Computer Science Project/Machine Learning Test/output/fixations/ambix/RbgxpagCY_c_2")
-#     write_grayscale_video(video, "/home/speedman/Projects/School Programs/Computer Science Project/Machine Learning Test/video.mp4", fps=1)
-

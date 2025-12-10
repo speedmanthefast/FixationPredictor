@@ -6,7 +6,7 @@ from moviepy.video.VideoClip import VideoClip
 
 
 
-def extract_speech(input_video_path, input_audio_path, output_path):
+def extract_speech(input_video_path, input_audio_path, output_path, verbose=False):
     VIDEO_PATH = input_video_path
     AUDIO_PATH = input_audio_path
 
