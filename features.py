@@ -12,6 +12,7 @@ from extraction.motion import extract_motion
 from extraction.xgrad import extract_xgrad
 from extraction.edges import extract_edges
 from extraction.equator import extract_equator
+from extraction.ygrad import extract_ygrad
 import ffmpeg
 import argparse
 
@@ -33,7 +34,7 @@ class FeatureExtractionWrapper:
     def extract(self, input_video, output_path, input_audio=None):
 
         if not os.path.exists(output_path) or self.overwrite:
-            print(f"Extracting {self.name} from {input_video}")
+            print(f"Extracting {self.name} from {input_video} to {output_path}")
         else:
             print(f"Skipping extration of {self.name} from {input_video}. Already exists.")
             return
@@ -169,9 +170,9 @@ def extract_single_video(video_path, output_dir="./inference/"):
 
         print(f"Beginning Feature Extraction for {instance.name} on {video_path} to {output_dir}")
         if instance.audio:
-            instance.extract(video_path, os.path.join(output_dir, f"{instance.name}/{instance.name}.mp4"), audio_path)
+            instance.extract(video_path, os.path.join(feature_output_path, f"{root}_{instance.name}.mp4"), audio_path)
         else:
-            instance.extract(video_path, os.path.join(output_dir, f"{instance.name}/{instance.name}.mp4"))
+            instance.extract(video_path, os.path.join(feature_output_path, f"{root}_{instance.name}.mp4"))
         print(f"Feature Extraction for {instance.name} on {video_path} to {output_dir} complete")
 
 
@@ -194,6 +195,7 @@ def wrap_features():
     FeatureExtractionWrapper("motion", extract_motion, needs_audio=False, overwrite=False)
     FeatureExtractionWrapper("gray", extract_gray, needs_audio=False, overwrite=False)
     FeatureExtractionWrapper("xgrad", extract_xgrad, needs_audio=False, overwrite=False)
+    FeatureExtractionWrapper("ygrad", extract_ygrad, needs_audio=False, overwrite=False)
     FeatureExtractionWrapper("equator", extract_equator, needs_audio=False, overwrite=False)
 
 

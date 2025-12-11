@@ -41,7 +41,7 @@ root
 ##################################################################
 
 class DataProcessor:
-    def __init__(self, features, dim=(256, 128), fps=8, sequence_length=3, target_smoothing_gaussian=20, debug=True):
+    def __init__(self, features, dim=(256, 128), fps=8, sequence_length=2, target_smoothing_gaussian=10, debug=True):
         self.IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
         self.VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv'}
         self.target_dim = dim                   # The height x width to resize data to
@@ -73,7 +73,7 @@ class DataProcessor:
 
         if raw_target is not None:
             print(f"Smoothing targets for {target_dir}")
-            smoothed_target = raw_target#gaussian_smooth(raw_target, sigma=self.target_smoothing_gaussian)
+            smoothed_target = gaussian_smooth(raw_target, sigma=self.target_smoothing_gaussian)
 
             resized_frames = []
             for i in range(smoothed_target.shape[0]):
@@ -118,7 +118,6 @@ class DataProcessor:
                     #
                     # # Avoid divide by zero
                     # if f_max - f_min > 1e-7:
-                    #     # Stretch values to be between 0 and 1
                     #     normalized_data = (raw_data - f_min) / (f_max - f_min)
                     # else:
                     #     normalized_data = raw_data
@@ -201,62 +200,6 @@ class DataProcessor:
 
         return feature_numpy, target_numpy
 
-    # def loadVideo(self, video_path):
-    #     target_fps = self.fps
-    #     cap = cv2.VideoCapture(video_path)
-    #
-    #     if not cap.isOpened():
-    #         print(f"Error: Could not open video at {video_path}")
-    #         return None
-    #
-    #     # Get original metadata
-    #     original_fps = cap.get(cv2.CAP_PROP_FPS)
-    #
-    #     # Read all frames into memory
-    #     # Note: OpenCV reads images in BGR format.
-    #     frames = []
-    #     while True:
-    #         ret, frame = cap.read()
-    #         if not ret:
-    #             break
-    #
-    #         # print(f"Resizing {frame.shape} to {self.target_dim}")
-    #         resized_frame = resizeFrame(frame, self.target_dim)
-    #         gray_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
-    #         frames.append(gray_frame / 255)
-    #
-    #     cap.release()
-    #
-    #     # Convert list to numpy array (Source Video)
-    #     # Shape: (Original_Frames, H, W, C)
-    #     source_array = np.array(frames)
-    #
-    #     original_frame_count = len(source_array)
-    #
-    #     # Calculate the new number of frames required
-    #     duration = original_frame_count / original_fps
-    #     target_frame_count = int(duration * target_fps)
-    #
-    #     print(f"Resampling from {original_fps} FPS ({original_frame_count} frames) "
-    #         f"to {target_fps} FPS ({target_frame_count} frames).")
-    #
-    #     # Re-sample video to meet target FPS
-    #     if target_frame_count > 0:
-    #         indices = np.arange(target_frame_count) * (original_fps / target_fps)
-    #         indices = indices.astype(int)
-    #
-    #         # Clip indices to ensure we don't exceed bounds (safety for rounding errors)
-    #         indices = np.clip(indices, 0, original_frame_count - 1)
-    #
-    #         # Use NumPy advanced indexing to create the new array instantly
-    #         output_array = source_array[indices]
-    #         video_padded = padVideo(output_array, self.frames_per_sequence)
-    #
-    #         print(f"Loaded video from {video_path} with dimensions {video_padded.shape}")
-    #         return video_padded
-    #     else:
-    #         return np.array([])
-
     def loadVideo(self, video_path):
         target_w, target_h = self.target_dim
 
@@ -294,7 +237,7 @@ class DataProcessor:
         images = []
         for item in items:
             item_fullpath = os.path.join(image_dir, item)
-            print(f"Reading image at {item_fullpath}")
+            #print(f"Reading image at {item_fullpath}")
             image = cv2.imread(item_fullpath, cv2.IMREAD_GRAYSCALE)
             if image is None:
                 raise IOError(f"Error: Could not load image at {item_fullpath}")
@@ -353,14 +296,13 @@ class DataProcessor:
             save_path = os.path.join(output_dir, filename)
 
             # Initialize VideoWriter
-            # Note: OpenCV expects size as (Width, Height)
+            # opencv expects size as (Width, Height)
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(save_path, fourcc, fps, (W, H))
 
             for t in range(T):
                 frame_norm = data[t, c]
 
-                # User requested scaling
                 # Assumes frame_norm is float 0.0 - 1.0
                 heatmap_uint8 = (frame_norm * 255).astype(np.uint8)
 

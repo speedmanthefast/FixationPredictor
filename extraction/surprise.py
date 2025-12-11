@@ -19,7 +19,7 @@ def extract_surprise(input_video_path, output_path, verbose=False): #note: input
 
     def mono(dir):
         os.makedirs(dir, exist_ok=True)
-        for file in os.listdir(input_dir):
+        for file in sorted(os.listdir(input_dir)):
             file_path  = os.path.join(input_dir, file)
             i = re.findall(r'\d+', file)
             file_num = [int(x) for x in i]
@@ -50,7 +50,10 @@ def extract_surprise(input_video_path, output_path, verbose=False): #note: input
         prev_average_array = float(0)
         output_num = 0
         brightness = 0
-        for file in os.listdir(output_dir):
+        for file in sorted(os.listdir(output_dir)):
+
+            if not file.endswith('.png'):
+                continue
 
 
             file_path  = os.path.join(output_dir, file)
@@ -129,7 +132,7 @@ def extract_surprise(input_video_path, output_path, verbose=False): #note: input
     def create_video():     #similar to Jimmy's video creater, but more simple
         #video_out = f"{out_dir}_map.mp4"
         video = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), 30, (72, 36), isColor=False)
-        for file in os.listdir(out_dir):
+        for file in sorted(os.listdir(out_dir)):
             video.write(cv2.imread(os.path.join(out_dir, file), cv2.IMREAD_GRAYSCALE))  #supposedly the images have 3 channels even though they're greyscale, IMREAD_GREYSCALE fixes that
 
         video.release()

@@ -59,45 +59,92 @@ class ConvLSTM(nn.Module):
         self.bias = bias                                        # should include bias? t/f
         self.layer_depth = layer_depth                          # how many convolutions per layer?
 
-        self.cells = []
+        # Down sampler
+        self.encoder = nn.Sequential(
+            # Downsample 2x
+            nn.Conv2d(input_dim, hidden_dim // 2, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            # Downsample 2x (Total 4x)
+            nn.Conv2d(hidden_dim // 2, hidden_dim, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.ReLU(inplace=True)
+        )
+
+        self.cells = nn.ModuleList()
         for i in range(layer_depth):
-            if i == 0:
-                cell_input = self.input_dim
-            else:
-                cell_input = self.hidden_dim
+            # The input to the first cell is now the output of the encoder (hidden_dim)
+            # All subsequent cells also communicate with hidden_dim
+            self.cells.append(ConvLSTMCell(hidden_dim, hidden_dim, self.kernel_size, self.bias))
 
-            # Create cell list
-            self.cells.append(ConvLSTMCell(cell_input, self.hidden_dim, self.kernel_size, self.bias))
+        self.decoder = nn.Sequential(
+            # Upsample 2x
+            nn.ConvTranspose2d(hidden_dim, hidden_dim // 2, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            # Upsample 2x
+            nn.ConvTranspose2d(hidden_dim // 2, hidden_dim, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.ReLU(inplace=True)
+        )
 
-        # register with pytorch
-        self.cells = nn.ModuleList(self.cells)
 
     def forward(self, input_tensor, hidden_state=None):
+        # input_tensor shape: (B, T, C, H, W)
         batch_size, time_steps, _, height, width = input_tensor.size()
 
-        # initial hidden states (one for each layer)
-        if hidden_state is None:
-            hidden_state = self.init_hidden(batch_size=batch_size, image_size=(height, width))
+        # Flatten time into batch to apply 2D Conv
+        x_flat = input_tensor.view(batch_size * time_steps, self.input_dim, height, width)
 
-        all_outputs = []        # Stores the outputs of each layer
+        # Apply Encoder
+        encoded_flat = self.encoder(x_flat)
+
+        # Unflatten back to sequence
+        # New shape: (B, T, hidden_dim, H/4, W/4)
+        _, c_enc, h_enc, w_enc = encoded_flat.size()
+        encoded_sequence = encoded_flat.view(batch_size, time_steps, c_enc, h_enc, w_enc)
+
+        if hidden_state is None:
+            # Initialize hidden state with the DOWN-SAMPLED size
+            hidden_state = self.init_hidden(batch_size=batch_size, image_size=(h_enc, w_enc))
+
         last_hidden_list = []    # Stores the final states of each layer
-        current_layer_inputs = input_tensor
+        current_layer_input = encoded_sequence
 
         for layer in range(self.layer_depth):
-            h, c = hidden_state[layer] # Get the initial hidden states for each layer (which depends on hidden_dim)
-            layer_outputs = []          # Stores the hidden state of each point in time
+            h, c = hidden_state[layer]
+            layer_outputs = []
 
             for time in range(time_steps):
-                h, c = self.cells[layer](input_tensor=current_layer_inputs[:, time, :, :, :], current_state=[h, c]) # Generate next hidden and cell state
-                layer_outputs.append(h)         # Save h for later
 
-            layer_output_stack = torch.stack(layer_outputs, dim=1)
-            current_layer_inputs = layer_output_stack
+                # Random state drop out to prevenet stickyness (didn't work at all)
+                # if self.training and torch.rand(1).item() < 0.1:
+                #     h = torch.zeros_like(h)
+                #     c = torch.zeros_like(c)
 
-            all_outputs.append(layer_output_stack)
+                # Process one time step
+                step_input = current_layer_input[:, time, :, :, :]
+                h, c = self.cells[layer](step_input, [h, c])
+                layer_outputs.append(h)
+
+            # Stack outputs to form the sequence for the next layer
+            current_layer_input = torch.stack(layer_outputs, dim=1)
             last_hidden_list.append((h, c))
 
-        return all_outputs[-1], last_hidden_list
+        lstm_output = current_layer_input # (B, T, hidden_dim, H/4, W/4)
+
+        # Flatten time again
+        lstm_output_flat = lstm_output.view(batch_size * time_steps, self.hidden_dim, h_enc, w_enc)
+
+        # Apply Decoder
+        decoded_flat = self.decoder(lstm_output_flat)
+
+        # Unflatten
+        # Final Shape: (B, T, hidden_dim, H, W)
+        _, c_dec, h_dec, w_dec = decoded_flat.size()
+        output = decoded_flat.view(batch_size, time_steps, c_dec, h_dec, w_dec)
+
+        return output, last_hidden_list
 
     def init_hidden(self, batch_size, image_size):
         init_states = []

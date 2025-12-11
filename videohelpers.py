@@ -81,38 +81,6 @@ def chunkVideo(X, frames_per_sequence):
 
     return sequenced_video
 
-# def toFPS(video_path, fps=30):
-#     basename = os.path.basename(video_path)
-#     dirname = os.path.dirname(video_path)
-#     new_video_path = f"{dirname}/filtered_{basename}"
-#
-#     # check if the filtered video does not exist
-#     if not os.path.exists(new_video_path):
-#         print("Filtering framerate to 30 FPS")
-#         #  add vsync='cfr' (Constant Frame Rate) to strictly enforce duplication/dropping
-#         (
-#             ffmpeg
-#             .input(video_path)
-#             .filter('fps', fps=fps, round='up')
-#             # fps_mode='cfr' enforces constant frame rate and timeline alignment
-#             .output(new_video_path, **{'fps_mode': 'cfr'})
-#             .run(overwrite_output=True, quiet=True)
-#         )
-#         print("Done")
-#     # if it does exist, check if it is already at the target FPS
-#     else:
-#         cap = cv2.VideoCapture(new_video_path)
-#         if not cap.isOpened():
-#             raise IOError(f"Error opening video file at {new_video_path}")
-#
-#         vid_fps = cap.get(cv2.CAP_PROP_FPS)
-#         cap.release()
-#
-#         if fps != vid_fps:
-#             ffmpeg.input(video_path).filter('fps', fps=fps).output(new_video_path).run()
-#
-#     return new_video_path
-
 def gaussian_smooth(fix_map, sigma=20, batch_size=32, device='cuda'):
 
     # use GPU if available
@@ -140,8 +108,8 @@ def gaussian_smooth(fix_map, sigma=20, batch_size=32, device='cuda'):
     with torch.no_grad():
         for i in range(0, total_frames, batch_size):
 
-            # Slice the numpy array
-            # Using min() ensures we don't go out of bounds on the last batch
+            # slice the numpy array
+            # min ensures we don't go out of bounds on the last batch
             end_idx = min(i + batch_size, total_frames)
             batch_np = fix_map[i : end_idx]
 
@@ -154,8 +122,8 @@ def gaussian_smooth(fix_map, sigma=20, batch_size=32, device='cuda'):
             # Normalization (min / max)
             B, C, H, W = smoothed_batch.shape
             flat = smoothed_batch.view(B, -1)
-            max_vals = flat.max(dim=1).values.view(B, 1, 1, 1) # Find max per image
-            smoothed_batch = smoothed_batch / (max_vals + 1e-7) # Add epsilon to prevent divide by zero
+            max_vals = flat.max(dim=1).values.view(B, 1, 1, 1)
+            smoothed_batch = smoothed_batch / (max_vals + 1e-7)
 
             # Move result back to CPU to free up VRAM
             processed_batches.append(smoothed_batch.squeeze(1).cpu())

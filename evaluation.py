@@ -57,9 +57,9 @@ class SaliencyMetrics:
 
         # Add titles and labels and stuff
         plt.legend()
-        plt.title("KLD-CC Training Chart", fontsize=16)
+        plt.title("KLD-CC-NSS Training Chart", fontsize=16)
         plt.xlabel("Batch", fontsize=12)
-        plt.ylabel("KLD-CC", fontsize=12)
+        plt.ylabel("KLD-CC-NSS", fontsize=12)
         plt.grid(True, linestyle='--', alpha=0.7)
 
         # Show the plot
@@ -100,7 +100,7 @@ class SaliencyMetrics:
         t_norm = self.normalize_std(targets)
 
         # Calculate correlation
-        cc = torch.mean(p_norm * t_norm, dim=(1, 2))
+        cc = torch.mean(p_norm * t_norm, dim=(1, 2, 3))
         return torch.mean(cc) # Average over batch (even though batch is actually 1 now)
 
     def SIM(self, preds, targets):
@@ -113,7 +113,7 @@ class SaliencyMetrics:
         t_norm = self.normalize_map(targets)
 
         # Sum of minimums
-        sim = torch.sum(torch.min(p_norm, t_norm), dim=(1, 2))
+        sim = torch.sum(torch.min(p_norm, t_norm), dim=(1, 2, 3))
         return torch.mean(sim)
 
     def KLD(self, preds, targets):
@@ -125,7 +125,7 @@ class SaliencyMetrics:
         p_norm = self.normalize_map(preds)
         t_norm = self.normalize_map(targets)
 
-        kld = torch.sum(t_norm * torch.log(1e-7 + t_norm / (p_norm + 1e-7)), dim=(1, 2))
+        kld = torch.sum(t_norm * torch.log(1e-7 + t_norm / (p_norm + 1e-7)), dim=(1, 2, 3))
         return torch.mean(kld)
 
     def NSS(self, preds, targets):
@@ -137,5 +137,5 @@ class SaliencyMetrics:
         # Normalize preds to 0-mean, 1-std
         p_norm = self.normalize_std(preds)
 
-        nss = torch.sum(p_norm * targets, dim=(1, 2)) / (torch.sum(targets, dim=(1, 2)) + 1e-7)
+        nss = torch.sum(p_norm * targets, dim=(1, 2, 3)) / (torch.sum(targets, dim=(1, 2, 3)) + 1e-7)
         return torch.mean(nss)

@@ -12,13 +12,15 @@ from sklearn.model_selection import train_test_split
 from videohelpers import chunkVideo, resizeFrame
 from evaluation import SaliencyMetrics
 import os
+import random
 
-class KLDCCLoss(nn.Module):
+class SaliencyLoss(nn.Module):
 
-    def __init__(self, kl=1.0, cc=10.0):
-        super(KLDCCLoss, self).__init__()
+    def __init__(self, kl=1.0, cc=10.0, nss=0.2):
+        super(SaliencyLoss, self).__init__()
         self.kl = kl
         self.cc = cc
+        self.nss = nss
 
     def forward(self, preds, targets):
         # Expect preds and targets to be in batches (B, H, W)
@@ -26,9 +28,11 @@ class KLDCCLoss(nn.Module):
         preds_flattened = preds.view(preds.size(0), -1)
         targets_flattened = targets.view(targets.size(0), -1)
 
+        # KLD
         targets_prob = targets_flattened / (targets_flattened.sum(dim=1, keepdim=True) + 1e-7)
         loss_kl = F.kl_div(preds_flattened, targets_prob, reduction='batchmean')
 
+        # CC
         x = torch.exp(preds_flattened)
         y = targets_flattened
         vx = x - x.mean(dim=1, keepdim=True)
@@ -36,10 +40,17 @@ class KLDCCLoss(nn.Module):
         cc = torch.sum(vx * vy, dim=1) / (torch.sqrt(torch.sum(vx ** 2, dim=1)) * torch.sqrt(torch.sum(vy ** 2, dim=1)) + 1e-7)
         loss_cc = cc.mean()
 
-        return (self.kl * loss_kl + self.cc * (1 - loss_cc))
+        # NSS
+        x_std = x.std(dim=1, keepdim=True)
+        x_norm = (x - x.mean(dim=1, keepdim=True)) / (x_std + 1e-7)
+        nss_numerator = torch.sum(x_norm * y, dim=1)
+        nss_denominator = torch.sum(y, dim=1) + 1e-7
+        nss_score = (nss_numerator / nss_denominator).mean()
+
+        return (self.kl * loss_kl) + (self.cc * (1 - loss_cc)) - (self.nss * nss_score)
 
 class FixationPredictor(nn.Module):
-    def __init__(self, features, hidden_dim=64, kernel_size=(7, 7), layer_depth=3, batch_size=1, learning_rate=0.001, weight_decay=0.0001, max_epochs=50, accumulation=4): #sequence_to_one=True):
+    def __init__(self, features, hidden_dim=64, kernel_size=(7, 7), layer_depth=3, batch_size=1, learning_rate=0.001, weight_decay=0.0005, max_epochs=50, accumulation=4): #sequence_to_one=True):
         # Init Pytorch module
         super(FixationPredictor, self).__init__()
 
@@ -56,6 +67,7 @@ class FixationPredictor(nn.Module):
         self.accumulation = accumulation    # How many times to accumulate gradients before updating weights (simulates batch training)
         self.channel_depth = len(features)  # The depth of the convolutional kernel. Should correspond to the number of features.
         self.features = features            # the list of chosen features
+        self.dropout = nn.Dropout2d(p=0.2)
 
         self.metrics = SaliencyMetrics()
 
@@ -75,6 +87,11 @@ class FixationPredictor(nn.Module):
         # x must be (B, T, C, H, W)
         B, T, C, H, W = x.shape
 
+        # Apply Dropout (only during training)
+        x_flat = x.view(B * T, C, H, W)
+        x_dropped = self.dropout(x_flat)
+        x = x_dropped.view(B, T, C, H, W)
+
         output, new_hidden_state = self.conv_lstm(x, hidden_state)
         B_out, T_out, C_out, H_out, W_out = output.shape
 
@@ -86,36 +103,11 @@ class FixationPredictor(nn.Module):
 
         return log_prob_maps, new_hidden_state
 
-        # output, new_hidden_state = self.conv_lstm(x, hidden_state)  # Run ConvLSTM over all frames
-        # output_flat = output.view(B * T, self.hidden_dim, H, W)     # flatten saliency map
-        # logits = self.decoder_conv(output_flat)                     # decode into logits (raw saliency scores)
-        # logits_flat = logits.view(B * T, -1)                        # flatten logits
-        # log_probs = torch.log_softmax(logits_flat, dim=1)           # normalize to (log) probability distribution
-        # probs = torch.exp(log_probs)                                # e^log(x) = x
-        # probs_map = probs.view(B, T, H, W)                          # reshape back into prob map
-        # mean_map = torch.mean(probs_map, dim=1)                     # average over the time dimension to match how the targets are generated
-        #
-        # return mean_map, new_hidden_state
-
-        # B, T, C, H, W = x.shape
-        #
-        # output, new_hidden_state = self.conv_lstm(x, hidden_state)
-        # B_out, T_out, C_out, H_out, W_out = output.shape
-        #
-        # mean_output = torch.mean(output, dim=1)                     # Get the average output in time
-        # logits = self.decoder_conv(mean_output)                     # Decode into saliency scores
-        # logits_flat = logits.view(B, -1)                            # flatten tensor per batch
-        # log_probabilities = torch.log_softmax(logits_flat, dim=1)   # Use softmax to compute log probabilities
-        # probabilities = torch.exp(log_probabilities)                # Convert log probs to probs
-        # prob_maps = probabilities.view(B, H_out, W_out)             # Re-shape back into 2D
-        #
-        # return prob_maps, new_hidden_state
-
     def fit(self):
 
         # Define optimizer and err functions
         optimizer = optim.Adam(self.conv_lstm.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        err_func = KLDCCLoss()
+        err_func = SaliencyLoss()
 
         self.train()
 
@@ -126,7 +118,11 @@ class FixationPredictor(nn.Module):
             if epoch % 2 == 0:
                 print(f"\rTraining [Progress: {100 * (epoch / self.max_epochs):<2.0f}%]", end="", flush=True)
 
-            for video_id, loader in self.train_loaders_dict.items():
+                video_ids = list(self.train_loaders_dict.keys())
+                random.shuffle(video_ids)
+
+            for video_id in video_ids:
+                loader = self.train_loaders_dict[video_id]
 
                 hidden_state = None # want to carry the hidden state across samples, but not across videos
                 optimizer.zero_grad()
@@ -174,8 +170,6 @@ class FixationPredictor(nn.Module):
         self.metrics.reset()
         self.eval()
 
-        err_func = KLDCCLoss(kl=10, cc=0.1)
-
         for video_id, loader in self.test_loaders_dict.items():
 
             for X_batch, y_batch in loader:
@@ -188,7 +182,6 @@ class FixationPredictor(nn.Module):
                 hidden_state = [(h.detach(), c.detach()) for h, c in hidden_state]
 
                 # Calculate the error
-                error = err_func(pred, y_batch)
                 pred_linear = torch.exp(pred.detach())
                 self.metrics.evaluate(pred_linear, y_batch)
 
@@ -240,6 +233,7 @@ class FixationPredictor(nn.Module):
 
         # Get video ids and split for training and testing
         video_ids = list(feature_dict.keys())
+        random.shuffle(video_ids)
 
         if len(video_ids) > 0:
             features_loaded = feature_dict[video_ids[0]].shape[1]
@@ -249,6 +243,9 @@ class FixationPredictor(nn.Module):
             raise ValueError("DataProcessor did not load any data")
 
         train_ids, test_ids = train_test_split(video_ids, test_size=0.2, random_state=42)
+
+        print(f"Training videos: {train_ids}")
+        print(f"Testing videos: {test_ids}")
 
         # Dicts to store data loaders
         self.train_loaders_dict = {}

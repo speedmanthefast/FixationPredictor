@@ -64,7 +64,7 @@ def extract_frequency(input_video_path, input_audio_path, output_path, verbose=F
         A_db = a_weighting_db(freqs)
         A_lin = (10.0 ** (A_db / 10.0))[:, None]
 
-        azimuths = np.radians(np.linspace(0.0, 360.0, az_res, endpoint=False))
+        azimuths = np.radians(np.linspace(-180.0, 180.0, az_res, endpoint=False))
         elevations = np.radians(np.linspace(-90.0, 90.0, el_res))
 
         frames_per_map = max(1, int(round(time_step / frame_duration)))
@@ -217,7 +217,11 @@ def extract_frequency(input_video_path, input_audio_path, output_path, verbose=F
     if data.ndim != 2 or data.shape[1] != 4:
         raise ValueError("Expected a 4-channel ambisonic WAV (W,X,Y,Z).")
 
-    W, X, Y, Z = data.T
+    W = data[:, 0]
+    X = data[:, 1]
+    Y = data[:, 2]
+    Z = data[:, 3]
+    Y = -Y
     print(f"Loaded {infile} @ {sr} Hz, {data.shape[0]} samples, channels: {data.shape[1]}")
 
     # ---------- USER CONFIG ----------
@@ -251,7 +255,7 @@ def extract_frequency(input_video_path, input_audio_path, output_path, verbose=F
 
     # quick show of the first heatmap (still includes graph elements for quick preview)
     plt.figure(figsize=(10, 4))
-    plt.imshow(heatmaps[0], origin='lower', aspect='auto', extent=[0, 360, -90, 90], cmap='inferno')
+    plt.imshow(heatmaps[0], origin='lower', aspect='auto', extent=[-180, 180, -90, 90], cmap='inferno')
     plt.colorbar(label="dB(A)")
     plt.title("First heatmap (t=0) - (with graph for preview)")
     plt.xlabel("Azimuth (deg)")
