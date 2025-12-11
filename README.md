@@ -1,6 +1,8 @@
 Fixation predicton using machine learning
 
 Created with Python 3.13.7 and Pip 25.2
+The fixations originally used in this project were generated using this gitub code
+https://github.com/cozcinar/360_Audio_Visual_ICMEW2020
 
 
 # HOW TO RUN
